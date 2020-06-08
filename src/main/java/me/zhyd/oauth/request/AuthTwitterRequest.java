@@ -1,23 +1,24 @@
 package me.zhyd.oauth.request;
 
-import cn.hutool.http.HttpRequest;
-import cn.hutool.http.HttpResponse;
 import com.alibaba.fastjson.JSONObject;
+import com.xkcoding.http.HttpUtil;
+import com.xkcoding.http.constants.Constants;
+import com.xkcoding.http.support.HttpHeader;
+import com.xkcoding.http.util.MapUtil;
 import me.zhyd.oauth.cache.AuthStateCache;
 import me.zhyd.oauth.config.AuthConfig;
-import me.zhyd.oauth.exception.AuthException;
 import me.zhyd.oauth.model.AuthCallback;
 import me.zhyd.oauth.model.AuthToken;
 import me.zhyd.oauth.model.AuthUser;
-import me.zhyd.oauth.utils.GlobalAuthUtil;
+import me.zhyd.oauth.utils.GlobalAuthUtils;
 import me.zhyd.oauth.utils.UrlBuilder;
 
 import java.util.HashMap;
 import java.util.Map;
 
 import static me.zhyd.oauth.config.AuthDefaultSource.TWITTER;
-import static me.zhyd.oauth.utils.GlobalAuthUtil.generateTwitterSignature;
-import static me.zhyd.oauth.utils.GlobalAuthUtil.urlEncode;
+import static me.zhyd.oauth.utils.GlobalAuthUtils.generateTwitterSignature;
+import static me.zhyd.oauth.utils.GlobalAuthUtils.urlEncode;
 
 /**
  * Twitter登录
@@ -38,6 +39,21 @@ public class AuthTwitterRequest extends AuthDefaultRequest {
     }
 
     /**
+     * 返回带{@code state}参数的授权url，授权回调时会带上这个{@code state}
+     *
+     * @param state state 验证授权流程的参数，可以防止csrf
+     * @return 返回授权地址
+     * @since 1.9.3
+     */
+    @Override
+    public String authorize(String state) {
+        AuthToken token  = this.getRequestToken();
+        return UrlBuilder.fromBaseUrl(source.authorize())
+            .queryParam("oauth_token", token.getOauthToken())
+            .build();
+    }
+
+    /**
      * Obtaining a request token
      * https://developer.twitter.com/en/docs/twitter-for-websites/log-in-with-twitter/guides/implementing-sign-in-with-twitter
      *
@@ -46,19 +62,24 @@ public class AuthTwitterRequest extends AuthDefaultRequest {
     public AuthToken getRequestToken() {
         String baseUrl = "https://api.twitter.com/oauth/request_token";
 
-        Map<String, Object> oauthParams = buildOauthParams();
+        Map<String, String> oauthParams = buildOauthParams();
         oauthParams.put("oauth_callback", config.getRedirectUri());
         oauthParams.put("oauth_signature", generateTwitterSignature(oauthParams, "POST", baseUrl, config.getClientSecret(), null));
         String header = buildHeader(oauthParams);
-        HttpResponse requestToken = HttpRequest.post(baseUrl).header("Authorization", header).execute();
-        checkResponse(requestToken);
 
-        Map<String, Object> res = GlobalAuthUtil.parseQueryToMap(requestToken.body());
+        HttpHeader httpHeader = new HttpHeader();
+        httpHeader.add("Authorization", header);
+        httpHeader.add("User-Agent", "themattharris' HTTP Client");
+        httpHeader.add("Host", "api.twitter.com");
+        httpHeader.add("Accept", "*/*");
+        String requestToken = HttpUtil.post(baseUrl, null, httpHeader);
+
+        Map<String, String> res = MapUtil.parseStringToMap(requestToken, false);
 
         return AuthToken.builder()
-            .oauthToken(res.get("oauth_token").toString())
-            .oauthTokenSecret(res.get("oauth_token_secret").toString())
-            .oauthCallbackConfirmed(Boolean.valueOf(res.get("oauth_callback_confirmed").toString()))
+            .oauthToken(res.get("oauth_token"))
+            .oauthTokenSecret(res.get("oauth_token_secret"))
+            .oauthCallbackConfirmed(Boolean.valueOf(res.get("oauth_callback_confirmed")))
             .build();
     }
 
@@ -70,45 +91,51 @@ public class AuthTwitterRequest extends AuthDefaultRequest {
      */
     @Override
     protected AuthToken getAccessToken(AuthCallback authCallback) {
-        Map<String, Object> oauthParams = buildOauthParams();
-        oauthParams.put("oauth_token", authCallback.getOauthToken());
-        oauthParams.put("oauth_verifier", authCallback.getOauthVerifier());
-        oauthParams.put("oauth_signature", generateTwitterSignature(oauthParams, "POST", source.accessToken(), config.getClientSecret(), authCallback.getOauthToken()));
+        Map<String, String> oauthParams = buildOauthParams();
+        oauthParams.put("oauth_token", authCallback.getOauth_token());
+        oauthParams.put("oauth_verifier", authCallback.getOauth_verifier());
+        oauthParams.put("oauth_signature", generateTwitterSignature(oauthParams, "POST", source.accessToken(), config.getClientSecret(), authCallback
+            .getOauth_token()));
         String header = buildHeader(oauthParams);
-        HttpResponse response = HttpRequest.post(source.accessToken())
-            .header("Authorization", header)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form("oauth_verifier", authCallback.getOauthVerifier())
-            .execute();
-        checkResponse(response);
 
-        Map<String, Object> requestToken = GlobalAuthUtil.parseQueryToMap(response.body());
+        HttpHeader httpHeader = new HttpHeader();
+        httpHeader.add("Authorization", header);
+        httpHeader.add(Constants.CONTENT_TYPE, "application/x-www-form-urlencoded");
+
+        Map<String, String> form = new HashMap<>(1);
+        form.put("oauth_verifier", authCallback.getOauth_verifier());
+        String response = HttpUtil.post(source.accessToken(), form, httpHeader, false);
+
+        Map<String, String> requestToken = MapUtil.parseStringToMap(response, false);
 
         return AuthToken.builder()
-            .oauthToken(requestToken.get("oauth_token").toString())
-            .oauthTokenSecret(requestToken.get("oauth_token_secret").toString())
-            .userId(requestToken.get("user_id").toString())
-            .screenName(requestToken.get("screen_name").toString())
+            .oauthToken(requestToken.get("oauth_token"))
+            .oauthTokenSecret(requestToken.get("oauth_token_secret"))
+            .userId(requestToken.get("user_id"))
+            .screenName(requestToken.get("screen_name"))
             .build();
     }
 
     @Override
     protected AuthUser getUserInfo(AuthToken authToken) {
-        Map<String, Object> queryParams = new HashMap<>();
+        Map<String, String> queryParams = new HashMap<>();
         queryParams.put("user_id", authToken.getUserId());
         queryParams.put("screen_name", authToken.getScreenName());
-        queryParams.put("include_entities", true);
+        queryParams.put("include_entities", Boolean.toString(true));
 
-        Map<String, Object> oauthParams = buildOauthParams();
+        Map<String, String> oauthParams = buildOauthParams();
         oauthParams.put("oauth_token", authToken.getOauthToken());
 
-        Map<String, Object> params = new HashMap<>(oauthParams);
+        Map<String, String> params = new HashMap<>(oauthParams);
         params.putAll(queryParams);
-        oauthParams.put("oauth_signature", generateTwitterSignature(params, "GET", source.userInfo(), config.getClientSecret(), authToken.getOauthTokenSecret()));
+        oauthParams.put("oauth_signature", generateTwitterSignature(params, "GET", source.userInfo(), config.getClientSecret(), authToken
+            .getOauthTokenSecret()));
         String header = buildHeader(oauthParams);
-        HttpResponse response = HttpRequest.get(userInfoUrl(authToken)).header("Authorization", header).execute();
-        checkResponse(response);
-        JSONObject userInfo = JSONObject.parseObject(response.body());
+
+        HttpHeader httpHeader = new HttpHeader();
+        httpHeader.add("Authorization", header);
+        String response = HttpUtil.get(userInfoUrl(authToken), null, httpHeader, false);
+        JSONObject userInfo = JSONObject.parseObject(response);
 
         return AuthUser.builder()
             .uuid(userInfo.getString("id_str"))
@@ -118,6 +145,7 @@ public class AuthTwitterRequest extends AuthDefaultRequest {
             .avatar(userInfo.getString("profile_image_url_https"))
             .blog(userInfo.getString("url"))
             .location(userInfo.getString("location"))
+            .avatar(userInfo.getString("profile_image_url"))
             .source(source.toString())
             .token(authToken)
             .build();
@@ -132,35 +160,23 @@ public class AuthTwitterRequest extends AuthDefaultRequest {
             .build();
     }
 
-    private Map<String, Object> buildOauthParams() {
-        Map<String, Object> params = new HashMap<>();
+    private Map<String, String> buildOauthParams() {
+        Map<String, String> params = new HashMap<>(5);
         params.put("oauth_consumer_key", config.getClientId());
-        params.put("oauth_nonce", GlobalAuthUtil.generateNonce(32));
+        params.put("oauth_nonce", GlobalAuthUtils.generateNonce(32));
         params.put("oauth_signature_method", "HMAC-SHA1");
-        params.put("oauth_timestamp", GlobalAuthUtil.getTimestamp());
+        params.put("oauth_timestamp", GlobalAuthUtils.getTimestamp());
         params.put("oauth_version", "1.0");
         return params;
     }
 
-    private String buildHeader(Map<String, Object> oauthParams) {
-        final StringBuilder sb = new StringBuilder(PREAMBLE);
+    private String buildHeader(Map<String, String> oauthParams) {
+        final StringBuilder sb = new StringBuilder(PREAMBLE + " ");
 
-        for (Map.Entry<String, Object> param : oauthParams.entrySet()) {
-            if (sb.length() > PREAMBLE.length()) {
-                sb.append(", ");
-            }
-            sb.append(param.getKey())
-                .append("=\"")
-                .append(urlEncode(param.getValue().toString()))
-                .append('"');
+        for (Map.Entry<String, String> param : oauthParams.entrySet()) {
+            sb.append(param.getKey()).append("=\"").append(urlEncode(param.getValue())).append('"').append(", ");
         }
 
-        return sb.toString();
-    }
-
-    private void checkResponse(HttpResponse response) {
-        if (!response.isOk()) {
-            throw new AuthException(response.body());
-        }
+        return sb.deleteCharAt(sb.length() - 2).toString();
     }
 }
